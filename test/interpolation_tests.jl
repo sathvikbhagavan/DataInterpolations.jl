@@ -676,6 +676,13 @@ end
     test_cached_index(A)
     push!(u, 1.0)
     @test_throws AssertionError CubicHermiteSpline(du, u, t)
+
+    du2 = Matrix(reduce(hcat, [du, du])')
+    u2 = Matrix(reduce(hcat, [u, u])')
+    A = CubicHermiteSpline(du2, u2, t; extrapolate = true)
+    @test A(t) ≈ u2
+    @test A(100.0)≈[10.106770, 10.106770] rtol=1e-5
+    @test A(300.0)≈[9.901542, 9.901542] rtol=1e-5
 end
 
 @testset "PCHIPInterpolation" begin
@@ -688,6 +695,12 @@ end
     @test all(minimum(u) .<= us)
     @test all(maximum(u) .>= us)
     @test all(A.du[3:4] .== 0.0)
+
+    u2 = Matrix(reduce(hcat, [u, u])')
+    A = PCHIPInterpolation(u2, t; extrapolate = true)
+    @test A(t) ≈ u2
+    @test A(100.0)≈[10.106770, 10.106770] rtol=1e-5
+    @test A(300.0)≈[9.901542, 9.901542] rtol=1e-5
 end
 
 @testset "Quintic Hermite Spline" begin
@@ -704,6 +717,14 @@ end
     test_cached_index(A)
     push!(u, 1.0)
     @test_throws AssertionError QuinticHermiteSpline(ddu, du, u, t)
+
+    ddu2 = Matrix(reduce(hcat, [ddu, ddu])')
+    du2 = Matrix(reduce(hcat, [du, du])')
+    u2 = Matrix(reduce(hcat, [u, u])')
+    A = QuinticHermiteSpline(ddu2, du2, u2, t; extrapolate = true)
+    @test A(t) ≈ u2
+    @test A(100.0)≈[10.107996, 10.107996] rtol=1e-5
+    @test A(300.0)≈[11.364162, 11.364162] rtol=1e-5
 end
 
 @testset "Curvefit" begin
