@@ -149,25 +149,20 @@ Extrapolation extends the last cubic polynomial on each side.
   - `extrapolate`: boolean value to allow extrapolation. Defaults to `false`.
   - `safetycopy`: boolean value to make a copy of `u` and `t`. Defaults to `true`.
 """
-struct AkimaInterpolation{uType, tType, IType, bType, cType, dType, T} <:
+struct AkimaInterpolation{uType, tType, IType, pType, T} <:
        AbstractInterpolation{T}
     u::uType
     t::tType
     I::IType
-    b::bType
-    c::cType
-    d::dType
+    p::pType
     extrapolate::Bool
     idx_prev::Base.RefValue{Int}
     safetycopy::Bool
-    function AkimaInterpolation(u, t, I, b, c, d, extrapolate, safetycopy)
-        new{typeof(u), typeof(t), typeof(I), typeof(b), typeof(c),
-            typeof(d), eltype(u)}(u,
+    function AkimaInterpolation(u, t, I, p, extrapolate, safetycopy)
+        new{typeof(u), typeof(t), typeof(I), typeof(p), eltype(u)}(u,
             t,
             I,
-            b,
-            c,
-            d,
+            p,
             extrapolate,
             Ref(1),
             safetycopy
@@ -177,29 +172,10 @@ end
 
 function AkimaInterpolation(u, t; extrapolate = false, safetycopy = true)
     u, t = munge_data(u, t, safetycopy)
-    n = length(t)
-    dt = diff(t)
-    m = Array{eltype(u)}(undef, n + 3)
-    m[3:(end - 2)] = diff(u) ./ dt
-    m[2] = 2m[3] - m[4]
-    m[1] = 2m[2] - m[3]
-    m[end - 1] = 2m[end - 2] - m[end - 3]
-    m[end] = 2m[end - 1] - m[end - 2]
-
-    b = 0.5 .* (m[4:end] .+ m[1:(end - 3)])
-    dm = abs.(diff(m))
-    f1 = dm[3:(n + 2)]
-    f2 = dm[1:n]
-    f12 = f1 + f2
-    ind = findall(f12 .> 1e-9 * maximum(f12))
-    b[ind] = (f1[ind] .* m[ind .+ 1] .+
-              f2[ind] .* m[ind .+ 2]) ./ f12[ind]
-    c = (3.0 .* m[3:(end - 2)] .- 2.0 .* b[1:(end - 1)] .- b[2:end]) ./ dt
-    d = (b[1:(end - 1)] .+ b[2:end] .- 2.0 .* m[3:(end - 2)]) ./ dt .^ 2
-
-    A = AkimaInterpolation(u, t, nothing, b, c, d, extrapolate, safetycopy)
+    p = AkimaParameterCache(u, t)
+    A = AkimaInterpolation(u, t, nothing, p, extrapolate, safetycopy)
     I = cumulative_integral(A)
-    AkimaInterpolation(u, t, I, b, c, d, extrapolate, safetycopy)
+    AkimaInterpolation(u, t, I, p, extrapolate, safetycopy)
 end
 
 """
@@ -328,6 +304,26 @@ function QuadraticSpline(
     QuadraticSpline(u, t, I, p, tA, d, z, extrapolate, safetycopy)
 end
 
+function QuadraticSpline(
+        u::uType, t; extrapolate = false, safetycopy = true) where {uType <: AbstractMatrix}
+    u, t = munge_data(u, t, safetycopy)
+    s = length(t)
+    dl = ones(eltype(t), s - 1)
+    d_tmp = ones(eltype(t), s)
+    du = zeros(eltype(t), s - 1)
+    tA = Tridiagonal(dl, d_tmp, du)
+
+    # zero for element type of d, which we don't know yet
+    typed_zero = zero(2 // 1 * (u[:, begin + 1] - u[:, begin]) / (t[begin + 1] - t[begin]))
+
+    d = map(i -> i == 1 ? typed_zero : 2 // 1 * (u[:, i] - u[:, i - 1]) / (t[i] - t[i - 1]), 1:s)
+    z = map(x -> tA \ getindex.(d, x), 1:size(u, 1))
+    p = QuadraticSplineParameterCache(z, t)
+    A = QuadraticSpline(u, t, nothing, p, tA, d, z, extrapolate, safetycopy)
+    I = cumulative_integral(A)
+    QuadraticSpline(u, t, I, p, tA, d, z, extrapolate, safetycopy)
+end
+
 """
     CubicSpline(u, t; extrapolate = false, safetycopy = true)
 
@@ -417,6 +413,32 @@ function CubicSpline(
     CubicSpline(u, t, I, p, h[1:(n + 1)], z, extrapolate, safetycopy)
 end
 
+function CubicSpline(u::uType,
+        t;
+        extrapolate = false, safetycopy = true) where {uType <: AbstractMatrix}
+    u, t = munge_data(u, t, safetycopy)
+    n = length(t) - 1
+    h = vcat(0, map(k -> t[k + 1] - t[k], 1:(length(t) - 1)), 0)
+    dl = vcat(h[2:n], zero(eltype(h)))
+    d_tmp = 2 .* (h[1:(n + 1)] .+ h[2:(n + 2)])
+    du = vcat(zero(eltype(h)), h[3:(n + 1)])
+    tA = Tridiagonal(dl, d_tmp, du)
+
+    # zero for element type of d, which we don't know yet
+    typed_zero = zero(6(u[:, begin + 2] - u[:, begin + 1]) / h[begin + 2] -
+                      6(u[:, begin + 1] - u[:, begin]) / h[begin + 1])
+
+    d = map(
+        i -> i == 1 || i == n + 1 ? typed_zero :
+             6(u[:, i + 1] - u[:, i]) / h[i + 1] - 6(u[:, i] - u[:, i - 1]) / h[i],
+        1:(n + 1))
+    z = map(x -> tA \ getindex.(d, x), 1:size(u, 1))
+    p = CubicSplineParameterCache(u, h, z)
+    A = CubicSpline(u, t, nothing, p, h[1:(n + 1)], z, extrapolate, safetycopy)
+    I = cumulative_integral(A)
+    CubicSpline(u, t, I, p, h[1:(n + 1)], z, extrapolate, safetycopy)
+end
+
 """
     BSplineInterpolation(u, t, d, pVecType, knotVecType; extrapolate = false, safetycopy = true)
 
@@ -482,66 +504,82 @@ function BSplineInterpolation(
     u, t = munge_data(u, t, safetycopy)
     n = length(t)
     n < d + 1 && error("BSplineInterpolation needs at least d + 1, i.e. $(d+1) points.")
-    s = zero(eltype(u))
-    p = zero(t)
-    k = zeros(eltype(t), n + d + 1)
-    l = zeros(eltype(u), n - 1)
-    p[1] = zero(eltype(t))
-    p[end] = one(eltype(t))
-
-    for i in 2:n
-        s += √((t[i] - t[i - 1])^2 + (u[i] - u[i - 1])^2)
-        l[i - 1] = s
-    end
-    if pVecType == :Uniform
+    
+    function get_parameters(u1, t1)
+        s = zero(eltype(u1))
+        p = zero(t1)
+        k = zeros(eltype(t1), n + d + 1)
+        l = zeros(eltype(u1), n - 1)
+        p[1] = zero(eltype(t1))
+        p[end] = one(eltype(t1))
+    
+        for i in 2:n
+            s += √((t1[i] - t1[i - 1])^2 + (u1[i] - u1[i - 1])^2)
+            l[i - 1] = s
+        end
+        if pVecType == :Uniform
+            for i in 2:(n - 1)
+                p[i] = p[1] + (i - 1) * (p[end] - p[1]) / (n - 1)
+            end
+        elseif pVecType == :ArcLen
+            for i in 2:(n - 1)
+                p[i] = p[1] + l[i - 1] / s * (p[end] - p[1])
+            end
+        end
+    
+        lidx = 1
+        ridx = length(k)
+        while lidx <= (d + 1) && ridx >= (length(k) - d)
+            k[lidx] = p[1]
+            k[ridx] = p[end]
+            lidx += 1
+            ridx -= 1
+        end
+    
+        ps = zeros(eltype(t1), n - 2)
+        s = zero(eltype(t1))
         for i in 2:(n - 1)
-            p[i] = p[1] + (i - 1) * (p[end] - p[1]) / (n - 1)
+            s += p[i]
+            ps[i - 1] = s
         end
-    elseif pVecType == :ArcLen
-        for i in 2:(n - 1)
-            p[i] = p[1] + l[i - 1] / s * (p[end] - p[1])
+    
+        if knotVecType == :Uniform
+            # uniformly spaced knot vector
+            # this method is not recommended because, if it is used with the chord length method for global interpolation,
+            # the system of linear equations would be singular.
+            for i in (d + 2):n
+                k[i] = k[1] + (i - d - 1) // (n - d) * (k[end] - k[1])
+            end
+        elseif knotVecType == :Average
+            # average spaced knot vector
+            idx = 1
+            if d + 2 <= n
+                k[d + 2] = 1 // d * ps[d]
+            end
+            for i in (d + 3):n
+                k[i] = 1 // d * (ps[idx + d] - ps[idx])
+                idx += 1
+            end
         end
+        # control points
+        N = zeros(eltype(t1), n, n)
+        spline_coefficients!(N, d, k, p)
+        c = vec(N \ u1[:, :])
+        N = zeros(eltype(t1), n)
+        return p, k, c, N
     end
 
-    lidx = 1
-    ridx = length(k)
-    while lidx <= (d + 1) && ridx >= (length(k) - d)
-        k[lidx] = p[1]
-        k[ridx] = p[end]
-        lidx += 1
-        ridx -= 1
+    if first(u) isa Number
+        p, k, c, N = get_parameters(u, t)
+    else
+        _u = first(u) isa AbstractVector ? reduce(hcat, u) : u
+        params = map(u1 -> get_parameters(u1, t), eachrow(_u))
+        p = getindex.(params, 1)
+        k = getindex.(params, 2)
+        c = getindex.(params, 3)
+        N = getindex.(params, 4)
     end
-
-    ps = zeros(eltype(t), n - 2)
-    s = zero(eltype(t))
-    for i in 2:(n - 1)
-        s += p[i]
-        ps[i - 1] = s
-    end
-
-    if knotVecType == :Uniform
-        # uniformly spaced knot vector
-        # this method is not recommended because, if it is used with the chord length method for global interpolation,
-        # the system of linear equations would be singular.
-        for i in (d + 2):n
-            k[i] = k[1] + (i - d - 1) // (n - d) * (k[end] - k[1])
-        end
-    elseif knotVecType == :Average
-        # average spaced knot vector
-        idx = 1
-        if d + 2 <= n
-            k[d + 2] = 1 // d * ps[d]
-        end
-        for i in (d + 3):n
-            k[i] = 1 // d * (ps[idx + d] - ps[idx])
-            idx += 1
-        end
-    end
-    # control points
-    N = zeros(eltype(t), n, n)
-    spline_coefficients!(N, d, k, p)
-    c = vec(N \ u[:, :])
-    N = zeros(eltype(t), n)
+    
     BSplineInterpolation(
         u, t, d, p, k, c, N, pVecType, knotVecType, extrapolate, safetycopy)
 end
@@ -617,87 +655,103 @@ function BSplineApprox(
     u, t = munge_data(u, t, safetycopy)
     n = length(t)
     h < d + 1 && error("BSplineApprox needs at least d + 1, i.e. $(d+1) control points.")
-    s = zero(eltype(u))
-    p = zero(t)
-    k = zeros(eltype(t), h + d + 1)
-    l = zeros(eltype(u), n - 1)
-    p[1] = zero(eltype(t))
-    p[end] = one(eltype(t))
+    
+    function get_parameters(u1, t1)
+        s = zero(eltype(u1))
+        p = zero(t1)
+        k = zeros(eltype(t1), h + d + 1)
+        l = zeros(eltype(u1), n - 1)
+        p[1] = zero(eltype(t1))
+        p[end] = one(eltype(t1))
 
-    for i in 2:n
-        s += √((t[i] - t[i - 1])^2 + (u[i] - u[i - 1])^2)
-        l[i - 1] = s
-    end
-    if pVecType == :Uniform
+        for i in 2:n
+            s += √((t1[i] - t1[i - 1])^2 + (u1[i] - u1[i - 1])^2)
+            l[i - 1] = s
+        end
+        if pVecType == :Uniform
+            for i in 2:(n - 1)
+                p[i] = p[1] + (i - 1) * (p[end] - p[1]) / (n - 1)
+            end
+        elseif pVecType == :ArcLen
+            for i in 2:(n - 1)
+                p[i] = p[1] + l[i - 1] / s * (p[end] - p[1])
+            end
+        end
+
+        lidx = 1
+        ridx = length(k)
+        while lidx <= (d + 1) && ridx >= (length(k) - d)
+            k[lidx] = p[1]
+            k[ridx] = p[end]
+            lidx += 1
+            ridx -= 1
+        end
+
+        ps = zeros(eltype(t1), n - 2)
+        s = zero(eltype(t1))
         for i in 2:(n - 1)
-            p[i] = p[1] + (i - 1) * (p[end] - p[1]) / (n - 1)
+            s += p[i]
+            ps[i - 1] = s
         end
-    elseif pVecType == :ArcLen
-        for i in 2:(n - 1)
-            p[i] = p[1] + l[i - 1] / s * (p[end] - p[1])
-        end
-    end
 
-    lidx = 1
-    ridx = length(k)
-    while lidx <= (d + 1) && ridx >= (length(k) - d)
-        k[lidx] = p[1]
-        k[ridx] = p[end]
-        lidx += 1
-        ridx -= 1
-    end
-
-    ps = zeros(eltype(t), n - 2)
-    s = zero(eltype(t))
-    for i in 2:(n - 1)
-        s += p[i]
-        ps[i - 1] = s
-    end
-
-    if knotVecType == :Uniform
-        # uniformly spaced knot vector
-        # this method is not recommended because, if it is used with the chord length method for global interpolation,
-        # the system of linear equations would be singular.
-        for i in (d + 2):h
-            k[i] = k[1] + (i - d - 1) // (h - d) * (k[end] - k[1])
+        if knotVecType == :Uniform
+            # uniformly spaced knot vector
+            # this method is not recommended because, if it is used with the chord length method for global interpolation,
+            # the system of linear equations would be singular.
+            for i in (d + 2):h
+                k[i] = k[1] + (i - d - 1) // (h - d) * (k[end] - k[1])
+            end
+        elseif knotVecType == :Average
+            # NOTE: verify that average method can be applied when size of k is less than size of p
+            # average spaced knot vector
+            idx = 1
+            if d + 2 <= h
+                k[d + 2] = 1 // d * ps[d]
+            end
+            for i in (d + 3):h
+                k[i] = 1 // d * (ps[idx + d] - ps[idx])
+                idx += 1
+            end
         end
-    elseif knotVecType == :Average
-        # NOTE: verify that average method can be applied when size of k is less than size of p
-        # average spaced knot vector
-        idx = 1
-        if d + 2 <= h
-            k[d + 2] = 1 // d * ps[d]
+        # control points
+        c = zeros(eltype(u1), h)
+        c[1] = u1[1]
+        c[end] = u1[end]
+        q = zeros(eltype(u1), n)
+        N = zeros(eltype(t1), n, h)
+        for i in 1:n
+            spline_coefficients!(view(N, i, :), d, k, p[i])
         end
-        for i in (d + 3):h
-            k[i] = 1 // d * (ps[idx + d] - ps[idx])
-            idx += 1
-        end
-    end
-    # control points
-    c = zeros(eltype(u), h)
-    c[1] = u[1]
-    c[end] = u[end]
-    q = zeros(eltype(u), n)
-    N = zeros(eltype(t), n, h)
-    for i in 1:n
-        spline_coefficients!(view(N, i, :), d, k, p[i])
-    end
-    for k in 2:(n - 1)
-        q[k] = u[k] - N[k, 1] * u[1] - N[k, h] * u[end]
-    end
-    Q = Matrix{eltype(u)}(undef, h - 2, 1)
-    for i in 2:(h - 1)
-        s = 0.0
         for k in 2:(n - 1)
-            s += N[k, i] * q[k]
+            q[k] = u1[k] - N[k, 1] * u1[1] - N[k, h] * u1[end]
         end
-        Q[i - 1] = s
+        Q = Matrix{eltype(u1)}(undef, h - 2, 1)
+        for i in 2:(h - 1)
+            s = 0.0
+            for k in 2:(n - 1)
+                s += N[k, i] * q[k]
+            end
+            Q[i - 1] = s
+        end
+        N = N[2:(end - 1), 2:(h - 1)]
+        M = transpose(N) * N
+        P = M \ Q
+        c[2:(end - 1)] .= vec(P)
+        N = zeros(eltype(t1), h)
+        return p, k, c, N
     end
-    N = N[2:(end - 1), 2:(h - 1)]
-    M = transpose(N) * N
-    P = M \ Q
-    c[2:(end - 1)] .= vec(P)
-    N = zeros(eltype(t), h)
+
+    if first(u) isa Number
+        p, k, c, N = get_parameters(u, t)
+    else
+        _u = first(u) isa AbstractVector ? reduce(hcat, u) : u
+        params = map(u1 -> get_parameters(u1, t), eachrow(_u))
+        p = getindex.(params, 1)
+        k = getindex.(params, 2)
+        c = getindex.(params, 3)
+        N = getindex.(params, 4)
+    end
+
     BSplineApprox(u, t, d, h, p, k, c, N, pVecType, knotVecType, extrapolate, safetycopy)
 end
 
@@ -733,7 +787,7 @@ struct CubicHermiteSpline{uType, tType, IType, duType, pType, T} <: AbstractInte
 end
 
 function CubicHermiteSpline(du, u, t; extrapolate = false, safetycopy = true)
-    @assert length(u)==length(du) "Length of `u` is not equal to length of `du`."
+    @assert size(u)==size(du) "Size of `u` is not equal to size of `du`."
     u, t = munge_data(u, t, safetycopy)
     p = CubicHermiteParameterCache(du, u, t)
     A = CubicHermiteSpline(du, u, t, nothing, p, extrapolate, safetycopy)
@@ -800,7 +854,7 @@ struct QuinticHermiteSpline{uType, tType, IType, duType, dduType, pType, T} <:
 end
 
 function QuinticHermiteSpline(ddu, du, u, t; extrapolate = false, safetycopy = true)
-    @assert length(u)==length(du)==length(ddu) "Length of `u` is not equal to length of `du` or `ddu`."
+    @assert size(u)==size(du)==size(ddu) "Size of `u` is not equal to size of `du` or `ddu`."
     u, t = munge_data(u, t, safetycopy)
     p = QuinticHermiteParameterCache(ddu, du, u, t)
     A = QuinticHermiteSpline(ddu, du, u, t, nothing, p, extrapolate, safetycopy)

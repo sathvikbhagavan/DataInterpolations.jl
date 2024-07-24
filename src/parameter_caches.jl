@@ -59,12 +59,65 @@ function quadratic_interpolation_parameters(u, t, idx)
     return l₀, l₁, l₂
 end
 
+struct AkimaParameterCache{pType}
+    b::pType
+    c::pType
+    d::pType
+end
+
+function AkimaParameterCache(u, t)
+    n = length(t)
+    dt = diff(t)
+    if u isa AbstractMatrix
+        m = zeros(eltype(u), size(u, 1), n+3)
+        m[:, 3:(end - 2)] .= mapslices(x -> x ./ dt, diff(u, dims = 2); dims = 2)
+        m[:, 2] .= 2m[:, 3] .- m[:, 4]
+        m[:, 1] .= 2m[:, 2] .- m[3]
+        m[:, end - 1] .= 2m[:, end - 2] - m[:, end - 3]
+        m[:, end] .= 2m[:, end - 1] .- m[:, end - 2]
+        b = 0.5 .* (m[:, 4:end] .+ m[:, 1:(end - 3)])
+        dm = abs.(diff(m, dims = 2))
+        f1 = dm[:, 3:(n + 2)]
+        f2 = dm[:, 1:n]
+        f12 = f1 .+ f2
+        ind = findall(f12 .> 1e-9 * maximum(f12))
+        indi = map(i -> i.I, ind)
+        b[ind] .= (f1[ind] .* m[CartesianIndex.(map(i -> (i[1], i[2] + 1), indi))] .+
+                f2[ind] .* m[CartesianIndex.(map(i -> (i[1], i[2] + 2), indi))]) ./ f12[ind]
+        c = mapslices(x -> x ./ dt, (3.0 .* m[:, 3:(end - 2)] .- 2.0 .* b[:, 1:(end - 1)] .- b[:, 2:end]); dims = 2)
+        d = mapslices(x -> x ./ dt .^ 2, (b[:, 1:(end - 1)] .+ b[:, 2:end] .- 2.0 .* m[:, 3:(end - 2)]); dims = 2)
+    else
+        m = Array{eltype(u)}(undef, n + 3)
+        m[3:(end - 2)] = diff(u) ./ dt
+        m[2] = 2m[3] - m[4]
+        m[1] = 2m[2] - m[3]
+        m[end - 1] = 2m[end - 2] - m[end - 3]
+        m[end] = 2m[end - 1] - m[end - 2]
+        b = 0.5 .* (m[4:end] .+ m[1:(end - 3)])
+        dm = abs.(diff(m))
+        f1 = dm[3:(n + 2)]
+        f2 = dm[1:n]
+        f12 = f1 + f2
+        ind = findall(f12 .> 1e-9 * maximum(f12))
+        b[ind] = (f1[ind] .* m[ind .+ 1] .+
+                f2[ind] .* m[ind .+ 2]) ./ f12[ind]
+        c = (3.0 .* m[3:(end - 2)] .- 2.0 .* b[1:(end - 1)] .- b[2:end]) ./ dt
+        d = (b[1:(end - 1)] .+ b[2:end] .- 2.0 .* m[3:(end - 2)]) ./ dt .^ 2
+    end
+    AkimaParameterCache(b, c, d)
+end
+
 struct QuadraticSplineParameterCache{pType}
     σ::pType
 end
 
-function QuadraticSplineParameterCache(z, t)
+function QuadraticSplineParameterCache(z::AbstractVector{<:Number}, t)
     σ = quadratic_spline_parameters.(Ref(z), Ref(t), 1:(length(t) - 1))
+    return QuadraticSplineParameterCache(σ)
+end
+
+function QuadraticSplineParameterCache(z::AbstractVector, t)
+    σ = map(zi -> quadratic_spline_parameters.(Ref(zi), Ref(t), 1:(length(t) - 1)), z)
     return QuadraticSplineParameterCache(σ)
 end
 
@@ -78,10 +131,19 @@ struct CubicSplineParameterCache{pType}
     c₂::pType
 end
 
-function CubicSplineParameterCache(u, h, z)
+function CubicSplineParameterCache(u::AbstractVector, h, z)
     parameters = cubic_spline_parameters.(
         Ref(u), Ref(h), Ref(z), 1:(size(u)[end] - 1))
     c₁, c₂ = collect.(eachrow(stack(collect.(parameters))))
+    return CubicSplineParameterCache(c₁, c₂)
+end
+
+function CubicSplineParameterCache(u::AbstractMatrix, h, z)
+    parameters = map(i -> cubic_spline_parameters.(
+        Ref(view(u, i, :)), Ref(h), Ref(z[i]), 1:(size(u)[end] - 1)), 1:length(z))
+    cs = map(parametersi -> collect.(eachrow(hcat(collect.(parametersi)...))), parameters)
+    c₁ = getindex.(cs, 1)
+    c₂ = getindex.(cs, 2)
     return CubicSplineParameterCache(c₁, c₂)
 end
 
@@ -96,10 +158,19 @@ struct CubicHermiteParameterCache{pType}
     c₂::pType
 end
 
-function CubicHermiteParameterCache(du, u, t)
+function CubicHermiteParameterCache(du::AbstractVector, u, t)
     parameters = cubic_hermite_spline_parameters.(
         Ref(du), Ref(u), Ref(t), 1:(length(t) - 1))
     c₁, c₂ = collect.(eachrow(stack(collect.(parameters))))
+    return CubicHermiteParameterCache(c₁, c₂)
+end
+
+function CubicHermiteParameterCache(du::AbstractMatrix, u, t)
+    parameters = map(i -> cubic_hermite_spline_parameters.(
+        Ref(view(du, i, :)), Ref(view(u, i, :)), Ref(t), 1:(length(t) - 1)), 1:size(u, 1))
+    cs = map(parametersi -> collect.(eachrow(hcat(collect.(parametersi)...))), parameters)
+    c₁ = getindex.(cs, 1)
+    c₂ = getindex.(cs, 2)
     return CubicHermiteParameterCache(c₁, c₂)
 end
 
@@ -120,10 +191,20 @@ struct QuinticHermiteParameterCache{pType}
     c₃::pType
 end
 
-function QuinticHermiteParameterCache(ddu, du, u, t)
+function QuinticHermiteParameterCache(ddu::AbstractVector, du, u, t)
     parameters = quintic_hermite_spline_parameters.(
         Ref(ddu), Ref(du), Ref(u), Ref(t), 1:(length(t) - 1))
     c₁, c₂, c₃ = collect.(eachrow(stack(collect.(parameters))))
+    return QuinticHermiteParameterCache(c₁, c₂, c₃)
+end
+
+function QuinticHermiteParameterCache(ddu::AbstractMatrix, du, u, t)
+    parameters = map(i -> quintic_hermite_spline_parameters.(
+        Ref(view(ddu, i, :)), Ref(view(du, i, :)), Ref(view(u, i, :)), Ref(t), 1:(length(t) - 1)), 1:size(u, 1))
+    cs = map(parametersi -> collect.(eachrow(hcat(collect.(parametersi)...))), parameters)
+    c₁ = getindex.(cs, 1)
+    c₂ = getindex.(cs, 2)
+    c₃ = getindex.(cs, 3)
     return QuinticHermiteParameterCache(c₁, c₂, c₃)
 end
 

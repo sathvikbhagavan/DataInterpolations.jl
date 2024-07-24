@@ -118,7 +118,13 @@ end
 function _interpolate(A::AkimaInterpolation{<:AbstractVector}, t::Number, iguess)
     idx = get_idx(A.t, t, iguess)
     wj = t - A.t[idx]
-    (@evalpoly wj A.u[idx] A.b[idx] A.c[idx] A.d[idx]), idx
+    (@evalpoly wj A.u[idx] A.p.b[idx] A.p.c[idx] A.p.d[idx]), idx
+end
+
+function _interpolate(A::AkimaInterpolation{<:AbstractMatrix}, t::Number, iguess)
+    idx = get_idx(A.t, t, iguess)
+    wj = t - A.t[idx]
+    (@. @evalpoly wj A.u[:, idx] A.p.b[:, idx] A.p.c[:, idx] A.p.d[:, idx]), idx
 end
 
 # ConstantInterpolation Interpolation
@@ -152,6 +158,13 @@ function _interpolate(A::QuadraticSpline{<:AbstractVector}, t::Number, iguess)
     return A.z[idx] * Δt + A.p.σ[idx] * Δt^2 + Cᵢ, idx
 end
 
+function _interpolate(A::QuadraticSpline{<:AbstractMatrix}, t::Number, iguess)
+    idx = get_idx(A.t, t, iguess)
+    Cᵢ = A.u[:, idx]
+    Δt = t - A.t[idx]
+    return getindex.(A.p.σ, idx) * Δt + getindex.(A.p.σ, idx) * Δt^2 + Cᵢ, idx
+end
+
 # CubicSpline Interpolation
 function _interpolate(A::CubicSpline{<:AbstractVector}, t::Number, iguess)
     idx = get_idx(A.t, t, iguess)
@@ -160,6 +173,16 @@ function _interpolate(A::CubicSpline{<:AbstractVector}, t::Number, iguess)
     I = (A.z[idx] * Δt₂^3 + A.z[idx + 1] * Δt₁^3) / (6A.h[idx + 1])
     C = A.p.c₁[idx] * Δt₁
     D = A.p.c₂[idx] * Δt₂
+    I + C + D, idx
+end
+
+function _interpolate(A::CubicSpline{<:AbstractMatrix}, t::Number, iguess)
+    idx = get_idx(A.t, t, iguess)
+    Δt₁ = t - A.t[idx]
+    Δt₂ = A.t[idx + 1] - t
+    I = (getindex.(A.z, idx) .* Δt₂^3 + getindex.(A.z, idx+1) * Δt₁^3) / (6A.h[idx + 1])
+    C = getindex.(A.p.c₁, idx) * Δt₁
+    D = getindex.(A.p.c₂, idx) * Δt₂
     I + C + D, idx
 end
 
@@ -182,6 +205,26 @@ function _interpolate(A::BSplineInterpolation{<:AbstractVector{<:Number}},
     ucum, idx
 end
 
+function _interpolate(A::BSplineInterpolation{<:Union{AbstractVector, AbstractMatrix}},
+    t::Number,
+    iguess)
+    t < A.t[1] && return A.u[1], 1
+    t > A.t[end] && return A.u[end], lastindex(t)
+    # change t into param [0 1]
+    idx = get_idx(A.t, t, iguess)
+    ts = map(i -> A.p[i][idx] + (t - A.t[idx]) / (A.t[idx + 1] - A.t[idx]) * (A.p[i][idx + 1] - A.p[i][idx]), 1:size(A.u,1))
+    n = length(A.t)
+    N = map(i -> first(ts) isa ForwardDiff.Dual ? zeros(eltype(ts), n) : A.N[i], 1:size(A.u, 1))
+    nonzero_coefficient_idxs = map(i -> spline_coefficients!(N[i], A.d, A.k[i], ts[i]), 1:size(A.u, 1))
+    ucum = zeros(eltype(A.u), size(A.u, 1))
+    for i in axes(A.u, 1)
+        for j in nonzero_coefficient_idxs[i]
+            ucum[i] += N[i][j] * A.c[i][j]
+        end
+    end
+    ucum, idx
+end
+
 # BSpline Curve Approx
 function _interpolate(A::BSplineApprox{<:AbstractVector{<:Number}}, t::Number, iguess)
     t < A.t[1] && return A.u[1], 1
@@ -198,6 +241,23 @@ function _interpolate(A::BSplineApprox{<:AbstractVector{<:Number}}, t::Number, i
     ucum, idx
 end
 
+function _interpolate(A::BSplineApprox{<:Union{AbstractVector, AbstractMatrix}}, t::Number, iguess)
+    t < A.t[1] && return A.u[1], 1
+    t > A.t[end] && return A.u[end], lastindex(t)
+    # change t into param [0 1]
+    idx = get_idx(A.t, t, iguess)
+    ts = map(i -> A.p[i][idx] + (t - A.t[idx]) / (A.t[idx + 1] - A.t[idx]) * (A.p[i][idx + 1] - A.p[i][idx]), 1:size(A.u,1))
+    N = map(i -> first(ts) isa ForwardDiff.Dual ? zeros(eltype(ts), A.h) : A.N[i], 1:size(A.u, 1))
+    nonzero_coefficient_idxs = map(i -> spline_coefficients!(N[i], A.d, A.k[i], ts[i]), 1:size(A.u, 1))
+    ucum = zeros(eltype(A.u), size(A.u, 1))
+    for i in axes(A.u, 1)
+        for j in nonzero_coefficient_idxs[i]
+            ucum[i] += N[i][j] * A.c[i][j]
+        end
+    end
+    ucum, idx
+end
+
 # Cubic Hermite Spline
 function _interpolate(
         A::CubicHermiteSpline{<:AbstractVector{<:Number}}, t::Number, iguess)
@@ -209,6 +269,16 @@ function _interpolate(
     out, idx
 end
 
+function _interpolate(
+        A::CubicHermiteSpline{<:AbstractMatrix}, t::Number, iguess)
+    idx = get_idx(A.t, t, iguess)
+    Δt₀ = t - A.t[idx]
+    Δt₁ = t - A.t[idx + 1]
+    out = A.u[:, idx] .+ Δt₀ .* A.du[:, idx]
+    out += Δt₀^2 .* (getindex.(A.p.c₁, idx) .+ Δt₁ .* getindex.(A.p.c₂, idx))
+    out, idx
+end
+
 # Quintic Hermite Spline
 function _interpolate(
         A::QuinticHermiteSpline{<:AbstractVector{<:Number}}, t::Number, iguess)
@@ -217,5 +287,15 @@ function _interpolate(
     Δt₁ = t - A.t[idx + 1]
     out = A.u[idx] + Δt₀ * (A.du[idx] + A.ddu[idx] * Δt₀ / 2)
     out += Δt₀^3 * (A.p.c₁[idx] + Δt₁ * (A.p.c₂[idx] + A.p.c₃[idx] * Δt₁))
+    out, idx
+end
+
+function _interpolate(
+        A::QuinticHermiteSpline{<:AbstractMatrix}, t::Number, iguess)
+    idx = get_idx(A.t, t, iguess)
+    Δt₀ = t - A.t[idx]
+    Δt₁ = t - A.t[idx + 1]
+    out = A.u[:, idx] .+ Δt₀ .* (A.du[:, idx] + A.ddu[:, idx] .* Δt₀ ./ 2)
+    out += Δt₀^3 .* (getindex.(A.p.c₁, idx) .+ Δt₁ .* (getindex.(A.p.c₂, idx) .+ getindex.(A.p.c₃, idx) .* Δt₁))
     out, idx
 end

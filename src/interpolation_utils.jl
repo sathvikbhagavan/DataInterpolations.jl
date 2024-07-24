@@ -87,7 +87,7 @@ function munge_data(u::AbstractVector, t::AbstractVector, safetycopy::Bool)
     return readonly_wrap(u), readonly_wrap(t)
 end
 
-function munge_data(U::StridedMatrix, t::AbstractVector, safetycopy::Bool)
+function munge_data(U::AbstractMatrix, t::AbstractVector, safetycopy::Bool)
     TU = Base.nonmissingtype(eltype(U))
     Tt = Base.nonmissingtype(eltype(t))
     @assert length(t) == size(U, 2)
@@ -132,11 +132,10 @@ function cumulative_integral(A)
 end
 
 function du_PCHIP(u, t)
-    h = diff(u)
-    δ = h ./ diff(t)
+    h = u isa AbstractMatrix ? diff(u; dims = 2) : diff(u)
+    δ = u isa AbstractMatrix ? mapslices(x -> x ./ diff(t), h; dims = 2) : h ./ diff(t)
     s = sign.(δ)
-
-    function _du(k)
+    function _du(k, ::AbstractVector)
         sₖ₋₁, sₖ = if k == 1
             s[1], s[2]
         elseif k == lastindex(t)
@@ -144,7 +143,6 @@ function du_PCHIP(u, t)
         else
             s[k - 1], s[k]
         end
-
         if sₖ₋₁ == 0 && sₖ == 0
             zero(eltype(δ))
         elseif sₖ₋₁ == sₖ
@@ -162,6 +160,31 @@ function du_PCHIP(u, t)
             zero(eltype(δ))
         end
     end
-
-    return _du.(eachindex(t))
+    function _du(k, ::AbstractMatrix)
+        sₖ₋₁, sₖ = if k == 1
+            s[:, 1], s[:, 2]
+        elseif k == lastindex(t)
+            s[:, end - 1], s[:, end]
+        else
+            s[:, k - 1], s[:, k]
+        end
+        if sₖ₋₁ == 0 && sₖ == 0
+            zeros(eltype(δ), size(δ, 1))
+        elseif sₖ₋₁ == sₖ
+            if k == 1
+                ((2 .* h[:, 1] .+ h[:, 2]) .* δ[:, 1] .- h[:, 1] .* δ[:, 2]) ./ (h[:, 1] + h[:, 2])
+            elseif k == lastindex(t)
+                ((2 * h[:, end] .+ h[:, end - 1]) .* δ[:, end] - h[:, end] .* δ[:, end - 1]) ./
+                (h[:, end] .+ h[:, end - 1])
+            else
+                w₁ = 2h[:, k] .+ h[:, k - 1]
+                w₂ = h[:, k] .+ 2h[:, k - 1]
+                δ[:, k - 1] .* δ[:, k] .* (w₁ .+ w₂) ./ (w₁ .* δ[:, k] .+ w₂ .* δ[k - 1])
+            end
+        else
+            zeros(eltype(δ), size(δ, 1))
+        end
+    end
+    du = _du.(eachindex(t), (u,))
+    return u isa AbstractMatrix ? reduce(hcat, du) : du
 end
